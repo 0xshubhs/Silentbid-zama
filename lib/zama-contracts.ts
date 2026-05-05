@@ -6,16 +6,17 @@
  */
 import { type Abi, type Address } from "viem"
 
-const env = (k: string): Address => {
-  const v = process.env[k] ?? ""
-  return (v || "0x0000000000000000000000000000000000000000") as Address
-}
+// Next.js webpack only replaces *literal* property access on process.env at
+// compile time. Dynamic keys like process.env[k] do NOT get replaced and
+// return undefined in the browser bundle — every address would silently
+// resolve to the zero address. Always reference each var by literal name.
+const ZERO = "0x0000000000000000000000000000000000000000" as const
 
-export const USDC_ADDRESS = env("NEXT_PUBLIC_USDC_ADDRESS")
-export const CUSDC_ADDRESS = env("NEXT_PUBLIC_CUSDC_ADDRESS")
-export const AUCTION_ADDRESS = env("NEXT_PUBLIC_AUCTION_ADDRESS")
-export const TREASURY_ADDRESS = env("NEXT_PUBLIC_TREASURY_ADDRESS")
-export const TOKENX_ADDRESS = env("NEXT_PUBLIC_TOKENX_ADDRESS")
+export const USDC_ADDRESS = (process.env.NEXT_PUBLIC_USDC_ADDRESS || ZERO) as Address
+export const CUSDC_ADDRESS = (process.env.NEXT_PUBLIC_CUSDC_ADDRESS || ZERO) as Address
+export const AUCTION_ADDRESS = (process.env.NEXT_PUBLIC_AUCTION_ADDRESS || ZERO) as Address
+export const TREASURY_ADDRESS = (process.env.NEXT_PUBLIC_TREASURY_ADDRESS || ZERO) as Address
+export const TOKENX_ADDRESS = (process.env.NEXT_PUBLIC_TOKENX_ADDRESS || ZERO) as Address
 
 export const USDC_DECIMALS = 6
 export const SCALE = 1_000_000n
@@ -151,7 +152,8 @@ export const AUCTION_ABI: Abi = [
       { name: "auctionId", type: "uint256" },
       { name: "encExtPrice", type: "bytes32" },
       { name: "encExtQty", type: "bytes32" },
-      { name: "inputProof", type: "bytes" },
+      { name: "priceProof", type: "bytes" },
+      { name: "qtyProof", type: "bytes" },
     ],
     outputs: [{ type: "uint256" }],
   },

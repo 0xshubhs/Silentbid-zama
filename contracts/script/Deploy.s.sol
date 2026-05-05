@@ -13,11 +13,9 @@ import {SilentBidAuction} from "../src/SilentBidAuction.sol";
 ///         Outputs deployed addresses to stdout — copy them to the frontend's `.env.local`.
 contract DeployScript is Script {
     function run() external {
-        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
-        address deployer = vm.addr(deployerKey);
-        console2.log("Deployer:", deployer);
+        console2.log("Deployer:", msg.sender);
 
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast();
 
         MockUSDC usdc = new MockUSDC();
         console2.log("MockUSDC:", address(usdc));

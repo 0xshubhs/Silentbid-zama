@@ -189,14 +189,14 @@ export function RevealPanel({
   }
 
   async function handleUnsealMyBid(bidIndex: number) {
-    if (!publicClient || !walletClient) return
+    if (!publicClient || !walletClient || !myAddr) return
     setError(null)
     try {
       setBusyReveal(bidIndex)
       await ensureZamaInit(publicClient as never, walletClient)
       const target = bids.find((b) => b.index === bidIndex)
       if (!target) throw new Error("bid not found")
-      const plain = (await userDecrypt(target.encPriceHandle, AUCTION_ADDRESS)) as bigint
+      const plain = (await userDecrypt(target.encPriceHandle, AUCTION_ADDRESS, myAddr, walletClient)) as bigint
       setBids((curr) =>
         curr.map((b) => (b.index === bidIndex ? { ...b, plainPrice: plain as bigint } : b)),
       )

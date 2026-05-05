@@ -128,6 +128,14 @@ export function PlaceBidForm({
       const encApproveHandle = handleToBytes32(encApprove.handles[0])
       const encApproveProof = encApprove.inputProof
 
+      // Sepolia FHEVM gas notes:
+      //   - Each FHE op costs 200k–1M gas via on-chain HCU enforcement.
+      //   - We cap `gas` explicitly so the wallet skips eth_estimateGas. Public
+      //     RPCs (publicnode, blastapi) reject estimates >~10–30M with the
+      //     literal string "gas limit too high", which viem then surfaces as a
+      //     contract revert. Cap = bypass that path.
+      //   - Numbers are conservative upper bounds verified via Foundry traces;
+      //     unused gas is refunded.
       setStep("approve")
       const approveHash = await walletClient.writeContract({
         address: CUSDC_ADDRESS,
@@ -136,19 +144,24 @@ export function PlaceBidForm({
         args: [AUCTION_ADDRESS, encApproveHandle, encApproveProof],
         account: walletClient.account!,
         chain: walletClient.chain,
+        gas: 3_500_000n,
       })
       const approveReceipt = await publicClient.waitForTransactionReceipt({ hash: approveHash })
       if (approveReceipt.status !== "success") throw new Error("cUSDC approve reverted")
 
       setStep("bid")
+      // The contract takes priceProof + qtyProof separately. Both encrypted
+      // handles came from the same encryptInputs() call, so they share one
+      // proof — pass it twice.
       const bidHash = await walletClient.writeContract({
         address: AUCTION_ADDRESS,
         abi: AUCTION_ABI,
         functionName: "placeBid",
-        args: [auctionId, encPriceHandle, encQtyHandle, inputProof],
+        args: [auctionId, encPriceHandle, encQtyHandle, inputProof, inputProof],
         value: gasFeeWei,
         account: walletClient.account!,
         chain: walletClient.chain,
+        gas: 12_000_000n,
       })
       const bidReceipt = await publicClient.waitForTransactionReceipt({ hash: bidHash })
       if (bidReceipt.status !== "success") throw new Error("placeBid reverted")

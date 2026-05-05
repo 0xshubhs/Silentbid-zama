@@ -7,7 +7,7 @@ const RPC =
 
 export const wagmiConfig = getDefaultConfig({
   appName: "SilentBID-ZAMA",
-  projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "demo",
+  projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "a73ceeb8d8079b8c1dc4d9d5ebbc0433",
   chains: [sepolia],
   transports: { [sepolia.id]: http(RPC) },
   ssr: true,

@@ -71,6 +71,7 @@ export function WalletPanel() {
         args: [address, 1000n * SCALE],
         account: walletClient.account!,
         chain: walletClient.chain,
+        gas: 200_000n,
       })
       const receipt = await publicClient.waitForTransactionReceipt({ hash })
       if (receipt.status !== "success") throw new Error("mint reverted")
@@ -103,6 +104,7 @@ export function WalletPanel() {
           args: [CUSDC_ADDRESS, MAX],
           account: walletClient.account!,
           chain: walletClient.chain,
+          gas: 100_000n,
         })
         const aRec = await publicClient.waitForTransactionReceipt({ hash: aHash })
         if (aRec.status !== "success") throw new Error("USDC approve reverted")
@@ -114,6 +116,8 @@ export function WalletPanel() {
         args: [amtRaw],
         account: walletClient.account!,
         chain: walletClient.chain,
+        // wrap mints encrypted balance via FHE.add — single FHE op + ACL grants.
+        gas: 1_500_000n,
       })
       const wRec = await publicClient.waitForTransactionReceipt({ hash: wHash })
       if (wRec.status !== "success") throw new Error("wrap reverted")
@@ -146,6 +150,8 @@ export function WalletPanel() {
         args: [encAmountHandle, encrypted.inputProof, address],
         account: walletClient.account!,
         chain: walletClient.chain,
+        // FHE.fromExternal + sub + makePubliclyDecryptable + ACL grants.
+        gas: 3_000_000n,
       })
       const reqRec = await publicClient.waitForTransactionReceipt({ hash: reqHash })
       if (reqRec.status !== "success") throw new Error("requestUnwrap reverted")
@@ -170,6 +176,8 @@ export function WalletPanel() {
         args: [args.unwrapId, plain, decryptionProof],
         account: walletClient.account!,
         chain: walletClient.chain,
+        // checkSignatures (KMS sig verify) + plaintext ERC20 transfer.
+        gas: 800_000n,
       })
       const cRec = await publicClient.waitForTransactionReceipt({ hash: cHash })
       if (cRec.status !== "success") throw new Error("claimUnwrap reverted")
@@ -183,12 +191,12 @@ export function WalletPanel() {
   }
 
   async function handleReveal() {
-    if (!publicClient || !walletClient || !hasSealed) return
+    if (!publicClient || !walletClient || !hasSealed || !address) return
     setError(null)
     try {
       setBusy("reveal")
       await ensureZamaInit(publicClient as never, walletClient)
-      const plain = (await userDecrypt(handle, CUSDC_ADDRESS)) as bigint
+      const plain = (await userDecrypt(handle, CUSDC_ADDRESS, address, walletClient)) as bigint
       setRevealed({ handle, value: plain as bigint })
     } catch (err) {
       setError(err instanceof Error ? err.message.slice(0, 140) : "Reveal failed")

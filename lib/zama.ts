@@ -16,15 +16,20 @@ import type { PublicClient, WalletClient } from "viem"
 
 // --- Lazy SDK module + instance singletons -----------------------------------
 
-// We cannot statically import the bundle entry: it contains top-level WASM
+// `/web` is the proper ESM entry (lib/web.js) that bundles initSDK +
+// createInstance + SepoliaConfig as real exports. The `/bundle` entry is a
+// thin shim over `window.relayerSDK` and only works after a UMD <script> tag
+// has populated that global; importing it as ESM yields undefined.
+//
+// We cannot statically import: the module contains top-level WASM
 // instantiation that breaks SSR. Cache the dynamic import so subsequent calls
 // don't re-evaluate the module.
-type ZamaBundle = typeof import("@zama-fhe/relayer-sdk/bundle")
+type ZamaBundle = typeof import("@zama-fhe/relayer-sdk/web")
 let bundlePromise: Promise<ZamaBundle> | null = null
 
 async function loadBundle(): Promise<ZamaBundle> {
   if (!bundlePromise) {
-    bundlePromise = import("@zama-fhe/relayer-sdk/bundle")
+    bundlePromise = import("@zama-fhe/relayer-sdk/web")
   }
   return bundlePromise
 }
@@ -57,22 +62,19 @@ async function getOrCreateInstance(): Promise<FhevmInstance> {
       await initSDKPromise
 
       // SepoliaConfig carries every contract address the SDK needs (ACL, KMS,
-      // input verifier, decryption oracle, gateway chain id, relayer URL). The
-      // only field we need to inject is `network` — the EIP-1193 provider that
-      // the SDK uses for `eth_call` reads against the host chain (Sepolia).
-      const injected =
-        typeof window !== "undefined"
-          ? (window as unknown as { ethereum?: unknown }).ethereum
-          : undefined
-
-      // Fallback to a public Sepolia RPC URL if no injected wallet exists.
-      const fallbackUrl =
+      // input verifier, decryption oracle, gateway chain id, relayer URL).
+      // `network` is the read-only RPC the SDK uses for `eth_call` against
+      // the host chain (chainId 11155111).
+      //
+      // Always use a Sepolia RPC URL — never `window.ethereum`. The injected
+      // wallet may be on a different chain (e.g. Base Sepolia from a prior
+      // session); reading state through it would return `0x` for every
+      // Zama-host call and produce a misleading "could not decode result data
+      // (eip712Domain)" error. Wallet signing for tx broadcast is unaffected
+      // — that's done separately via wagmi's WalletClient.
+      const network =
         process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL ||
-        "https://ethereum-sepolia-rpc.publicnode.com"
-
-      // The SDK accepts either an EIP-1193 provider (object) or an HTTP URL
-      // (string). `network` is typed `string | Eip1193Provider` so we assert.
-      const network = (injected ?? fallbackUrl) as string
+        "https://sepolia.gateway.tenderly.co"
 
       return sdk.createInstance({
         ...sdk.SepoliaConfig,
@@ -175,25 +177,19 @@ export async function encryptInputs(
 export async function userDecrypt(
   ctHash: bigint | string,
   contractAddress: string,
+  userAddress: string,
+  walletClient: WalletClient,
 ): Promise<bigint> {
   const instance = await getOrCreateInstance()
 
-  if (typeof window === "undefined") {
-    throw new Error("userDecrypt: must run in the browser")
-  }
-  const ethereum = (window as unknown as { ethereum?: any }).ethereum
-  if (!ethereum) throw new Error("userDecrypt: no injected wallet")
+  if (!userAddress) throw new Error("userDecrypt: missing userAddress")
+  if (!walletClient.account) throw new Error("userDecrypt: walletClient has no account")
 
-  // 1. Resolve the user's address.
-  const accounts: string[] = await ethereum.request({ method: "eth_accounts" })
-  const userAddress = accounts[0]
-  if (!userAddress) throw new Error("userDecrypt: wallet not connected")
-
-  // 2. Ephemeral keypair — used by the KMS to encrypt the response so only
+  // 1. Ephemeral keypair — used by the KMS to encrypt the response so only
   //    this client can read the plaintext.
   const { publicKey, privateKey } = instance.generateKeypair()
 
-  // 3. Build EIP-712 typed data binding the keypair to (contract, user) for
+  // 2. Build EIP-712 typed data binding the keypair to (contract, user) for
   //    a fixed window. (v0.4.2 doesn't take an extraData arg; the KMS context
   //    is resolved server-side.)
   const startTimestamp = Math.floor(Date.now() / 1000)
@@ -206,14 +202,38 @@ export async function userDecrypt(
     durationDays,
   )
 
-  // 4. Wallet signs the typed data. MetaMask + RainbowKit both accept the
-  //    `eth_signTypedData_v4` JSON-RPC method.
-  const signature: string = await ethereum.request({
-    method: "eth_signTypedData_v4",
-    params: [userAddress, JSON.stringify(eip712)],
+  // 3. Sign via wagmi's WalletClient (works with RainbowKit, WalletConnect,
+  //    MetaMask, etc. — not just window.ethereum). createEIP712 returns
+  //    {domain, types, primaryType, message}; viem's signTypedData wants the
+  //    same shape. We must drop EIP712Domain from `types` because viem
+  //    derives it from `domain` itself and rejects duplicates.
+  const typesWithoutDomain = { ...eip712.types } as Record<string, unknown>
+  delete typesWithoutDomain.EIP712Domain
+
+  // viem's WalletClient.signTypedData has an intricate generic that resolves
+  // to `never` for the parameter type when the client wasn't typed with a
+  // specific transport — cast to the call signature so we can invoke it.
+  const signTypedData = (
+    walletClient as unknown as {
+      signTypedData: (args: {
+        account: WalletClient["account"]
+        domain: unknown
+        types: unknown
+        primaryType: string
+        message: unknown
+      }) => Promise<`0x${string}`>
+    }
+  ).signTypedData
+
+  const signature = await signTypedData({
+    account: walletClient.account,
+    domain: eip712.domain,
+    types: typesWithoutDomain,
+    primaryType: eip712.primaryType,
+    message: eip712.message,
   })
 
-  // 5. Strip the 0x prefix from the signature — the SDK expects raw hex.
+  // 4. Strip the 0x prefix from the signature — the SDK expects raw hex.
   const sigNoPrefix = signature.startsWith("0x") ? signature.slice(2) : signature
 
   // 6. Ask the relayer for the plaintext. UserDecryptResults is a record

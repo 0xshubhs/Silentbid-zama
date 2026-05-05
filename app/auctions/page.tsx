@@ -26,7 +26,7 @@ export default async function AuctionsPage({
           SEALED-BID · ZAMA
         </h1>
         <p className="mt-6 max-w-lg font-mono text-sm text-muted-foreground leading-relaxed">
-          Privacy-first sealed-bid auctions on Base Sepolia. Bids are FHE-encrypted end to end —
+          Privacy-first sealed-bid auctions on Sepolia FHEVM. Bids are FHE-encrypted end to end —
           the running max is computed on-chain over encrypted handles, and nothing is revealed
           until the auction closes.
         </p>

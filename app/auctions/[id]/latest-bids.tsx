@@ -160,11 +160,11 @@ export function LatestBids({
 
   // Only allow unsealing your own bids.
   async function handleUnseal(row: BidRow) {
-    if (!publicClient || !walletClient) return
+    if (!publicClient || !walletClient || !myAddr) return
     setUnsealingIndex(row.index)
     try {
       await ensureZamaInit(publicClient as never, walletClient)
-      const plain = (await userDecrypt(row.encPriceHandle, AUCTION_ADDRESS)) as bigint
+      const plain = (await userDecrypt(row.encPriceHandle, AUCTION_ADDRESS, myAddr, walletClient)) as bigint
       setUnsealed((u) => ({ ...u, [row.index.toString()]: plain as bigint }))
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unseal failed")

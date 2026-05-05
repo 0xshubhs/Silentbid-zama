@@ -7,3 +7,6 @@ typechain-types/
 .env.*.local
 deployments.json
 dist/
+
+# 0xTools generated signatures
+signatures/

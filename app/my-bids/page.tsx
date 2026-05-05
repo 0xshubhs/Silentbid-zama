@@ -139,13 +139,13 @@ export default function MyBidsPage() {
   }, [publicClient, address])
 
   async function handleReveal(row: Row) {
-    if (!publicClient || !walletClient) return
+    if (!publicClient || !walletClient || !address) return
     const key = `${row.auctionId}-${row.bidIndex}`
     setBusyKey(key)
     setError(null)
     try {
       await ensureZamaInit(publicClient as never, walletClient)
-      const plain = (await userDecrypt(row.encPriceHandle, AUCTION_ADDRESS)) as bigint
+      const plain = (await userDecrypt(row.encPriceHandle, AUCTION_ADDRESS, address, walletClient)) as bigint
       setRevealed((r) => ({ ...r, [key]: plain }))
     } catch (err) {
       setError(err instanceof Error ? err.message.slice(0, 240) : "reveal failed")

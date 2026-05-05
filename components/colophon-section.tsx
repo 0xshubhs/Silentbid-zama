@@ -98,7 +98,7 @@ export function ColophonSection() {
             <li className="font-mono text-xs text-foreground/80">Tailwind CSS</li>
             <li className="font-mono text-xs text-foreground/80">Zama FHE</li>
             <li className="font-mono text-xs text-foreground/80">@zama-fhe/relayer-sdk</li>
-            <li className="font-mono text-xs text-foreground/80">Base Sepolia</li>
+            <li className="font-mono text-xs text-foreground/80">Sepolia FHEVM</li>
           </ul>
         </div>
 
