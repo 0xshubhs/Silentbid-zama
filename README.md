@@ -92,6 +92,56 @@ npm run dev
 # → http://localhost:3000
 ```
 
+### 4. Auto-finalize keeper (Vercel cron)
+
+Zama FHEVM v0.11 has no on-chain decryption callback — somebody has to fetch
+plaintext + KMS signatures from the relayer and submit them to
+`finalizeAuction*`. We do that automatically with a Vercel cron job:
+
+```
+app/api/cron/finalize/route.ts   # stateless keeper handler
+vercel.json                       # crons: */2 * * * * → /api/cron/finalize
+```
+
+State machine per tick (chain is the source of truth — no DB):
+
+```
+live (now < endTime, !ended)         → skip
+expired (now >= endTime, !ended)     → call endAuction
+ended && !finalized                  → publicDecrypt + finalizeAuctionItem
+finalized                            → skip
+```
+
+Each tick processes one transition; cron at `*/2 * * * *` means worst-case
+latency from `endTime` → settlement is ~6 minutes. The frontend's manual
+finalize button stays as a fallback if the keeper is offline.
+
+**Env vars required (Vercel project → Settings → Environment Variables):**
+
+```bash
+KEEPER_PRIVATE_KEY=0x...    # any funded EOA on Sepolia (~0.05 ETH for headroom)
+CRON_SECRET=<random-string> # protects /api/cron/finalize from arbitrary callers
+NEXT_PUBLIC_AUCTION_ADDRESS=0xa10314...
+NEXT_PUBLIC_SEPOLIA_RPC_URL=https://sepolia.gateway.tenderly.co
+```
+
+For local testing:
+
+```bash
+curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/finalize
+```
+
+**Limitations:**
+- ITEM mode only. TOKEN mode is disabled in the keeper because the deployed
+  contract encodes the cleartext array as `abi.encode(uint256[])` (dynamic
+  array) but the relayer hands back positional `abi.encode(uint256, uint256, …)`
+  — they don't match. Fix is in `_verifyTokenDecryption` at
+  `contracts/src/SilentBidAuction.sol:530-546`. Until redeployed, TOKEN-mode
+  auctions still need the manual finalize button.
+- Vercel Hobby plan caps cron frequency to once/day per job — use Pro for
+  per-minute. Local dev or any always-on Node host (Railway, Fly, your laptop)
+  works just as well.
+
 ## How the FHE flow works
 
 ### Place a sealed bid (TOKEN mode)

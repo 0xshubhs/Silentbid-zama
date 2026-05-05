@@ -3,6 +3,17 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // Empty turbopack config to silence the webpack-only warning in Next 16
   turbopack: {},
+  // node-tfhe / node-tkms ship raw `tfhe_bg.wasm` + `kms_lib_bg.wasm` blobs
+  // and load them via `fs.readFileSync(__dirname + '/tfhe_bg.wasm')`. If
+  // webpack bundles them, the runtime path becomes `.next/server/chunks/...`
+  // and the readFileSync call fails with ENOENT. Externalising tells Next to
+  // require these from `node_modules/` at runtime — paths stay sane and the
+  // wasm blobs are picked up by Vercel's build trace automatically.
+  serverExternalPackages: [
+    "node-tfhe",
+    "node-tkms",
+    "@zama-fhe/relayer-sdk",
+  ],
   async headers() {
     return [
       {
