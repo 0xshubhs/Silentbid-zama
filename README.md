@@ -111,7 +111,7 @@ After `createAuction` is mined, the frontend POSTs `{auctionId}` to
 `/api/scheduler`. That route re-reads the auction from chain (the client
 never gets to set the timing — only the chain's own `endTime` matters),
 then registers **two** one-shots against `/api/cron/finalize?auctionId=N`:
-one at `endTime + 30s` (drives `endAuction`) and one at `endTime + 150s`
+one at `endTime + 30s` (drives `endAuction`) and one at `endTime + 90s`
 (drives `publicDecrypt + finalizeAuctionItem`). Each invocation does at
 most one transition based on chain state, finishing in ~15-20s — well
 under Vercel Hobby's 60s function cap. The two one-shots share the same
@@ -139,7 +139,7 @@ finalized (a.finalized)                            → skip
 ```
 
 **Latency budget (happy path with cron-job.org):** `endAuction` lands ~30s
-after `endTime`, `finalize` lands ~150-160s after `endTime`. Worst case
+after `endTime`, `finalize` lands ~90-110s after `endTime`. Worst case
 (both one-shots missed, GH safety net catches up): ~30 min per transition.
 The frontend's manual finalize button still works either way.
 

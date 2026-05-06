@@ -128,15 +128,19 @@ export async function scheduleAuctionFinalize(opts: {
   // state machine run a single transition per call (~15-20s each):
   //
   //   endTime + 30s   → fires endAuction
-  //   endTime + 150s  → fires finalize (relayer has had 120s to index)
+  //   endTime + 90s   → fires finalize (~60s gap; tight but workable —
+  //                     endAuction takes ~15s to mine, then the Zama relayer
+  //                     needs ~24-30s to index the makePubliclyDecryptable
+  //                     event and produce KMS signatures)
   //
-  // The route is idempotent on chain state, so even if cron-job.org delivers
-  // both pings out of order or duplicates, nothing bad happens.
+  // If the relayer is briefly slow and finalize 404s, the GH Actions
+  // safety-net cron (*/30) catches up. The route is idempotent on chain
+  // state, so duplicates and out-of-order delivery are harmless.
   const baseClean = baseUrl.replace(/\/$/, "")
   const url = `${baseClean}/api/cron/finalize?auctionId=${auctionId}`
 
   const endFireAt = new Date((Number(endTimeUnix) + 30) * 1000)
-  const finalizeFireAt = new Date((Number(endTimeUnix) + 150) * 1000)
+  const finalizeFireAt = new Date((Number(endTimeUnix) + 90) * 1000)
 
   // Sequential, not parallel — cron-job.org's API rate-limits bursts.
   const endJobId = await createOneShot({
