@@ -127,9 +127,18 @@ export function AuctionList({ filter }: { filter?: AuctionStatus }) {
   }, [publicClient, fetchAuctions])
 
   const withLiveStatus = auctions.map((a) => ({ ...a, _status: auctionStatus(a, now) }))
+  // Newest first within each group. For the "all" view we sort by status
+  // bucket primary (live → ended → finalized) and id descending secondary so
+  // the most recent auction in each bucket leads. Filtered views just sort
+  // by id descending.
+  const byIdDesc = (a: typeof withLiveStatus[number], b: typeof withLiveStatus[number]) =>
+    a.id < b.id ? 1 : a.id > b.id ? -1 : 0
   const filtered = filter
-    ? withLiveStatus.filter((a) => a._status === filter)
-    : [...withLiveStatus].sort((a, b) => STATUS_ORDER[a._status] - STATUS_ORDER[b._status])
+    ? withLiveStatus.filter((a) => a._status === filter).sort(byIdDesc)
+    : [...withLiveStatus].sort((a, b) => {
+        const s = STATUS_ORDER[a._status] - STATUS_ORDER[b._status]
+        return s !== 0 ? s : byIdDesc(a, b)
+      })
 
   if (loading) {
     return (
