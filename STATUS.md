@@ -30,7 +30,7 @@ Two-layer scheduler: precise per-auction one-shots primary, periodic sweep secon
   - `?auctionId=N` mode: aggressively run BOTH transitions in one call (endAuction → 30s wait → publicDecrypt → finalize)
   - no-param mode: sweep all auctions, one transition per call (safety-net path)
   - Time check uses on-chain `block.timestamp`, never `Date.now()` — immune to scheduler clock skew
-- `app/api/scheduler/route.ts` — POST {auctionId}; re-reads auction from chain, validates state, registers a cron-job.org one-shot at `endTime + 90s`
+- `app/api/scheduler/route.ts` — POST {auctionId}; re-reads auction from chain, validates state, registers TWO cron-job.org one-shots: `endTime + 30s` (drives endAuction) and `endTime + 150s` (drives finalize). Two-shot split keeps every Vercel invocation under the Hobby 60s cap.
 - `lib/scheduler.ts` — cron-job.org REST wrapper (one PUT to `/jobs`, schedules a one-shot fire with auto-expiry 10 min after fire window)
 - `.github/workflows/keeper.yml` — GitHub Actions sweep `*/30 * * * *` (safety net only)
 - `vercel.json` — function-level `maxDuration: 60` only (Hobby cron is useless: 1/day cap)
@@ -59,9 +59,10 @@ Settlement landed in **~2.5–3 min after endTime** for both, all driven by a si
 ## 🟡 Partial / Caveats
 
 - **Keeper supports ITEM mode only.** TOKEN mode is gated behind a contract bug — see Remaining.
-- **One-shot precision** measured live: endTime → ENDED is +87s/+102s, endTime → FINALIZED is +149s/+180s (both auctions on 2026-05-06).
+- **One-shot precision (two-shot architecture):** `endAuction` lands ~30-50s after endTime, `finalize` lands ~150-180s after endTime. Each invocation runs in ~15-20s — well under the Vercel Hobby 60s cap.
 - **Safety-net latency = ~30 min worst case** (GH Actions cron `*/30` + small jitter). This is the fallback when cron-job.org missed the auction.
-- **Total cron-job.org slot usage = 1 active job per pending auction.** Free-tier cap is 50, so up to 50 simultaneously-pending auctions before the limit bites. Auto-expiry keeps the pool fresh as auctions finalize.
+- **Total cron-job.org slot usage = 2 active jobs per pending auction** (endAuction one-shot + finalize one-shot). Free tier caps at 50, so up to ~25 simultaneously-pending auctions before the limit bites. Auto-expiry (10 min after fire window) keeps the pool fresh.
+- **First version tried doing both transitions in one call.** Worked in `next dev` (no time limit) but was risky on Vercel Hobby (~57s of work on a 60s cap, prod observed `ended=true && !finalized` on at least one auction before the manual finalize button was clicked). Split-into-two solves it.
 - **Privacy of TOKEN-mode losers.** `endAuction` makes every bid's `(encPrice, encQty)` publicly decryptable — every loser's bid leaks at settlement. ITEM mode losers stay private.
 - **Bid count, bidder address, and participation flag** are plaintext on-chain (event topics + `hasBid` mapping). This is unchanged from the original architecture.
 

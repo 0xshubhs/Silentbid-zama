@@ -8,10 +8,12 @@
  * caller, automatically. The chain remains the state machine — no DB.
  *
  * Two callers, one route:
- *   1. cron-job.org one-shot at endTime+90s for a specific auction:
+ *   1. cron-job.org one-shots for a specific auction:
  *        GET /api/cron/finalize?auctionId=N
- *      Tries to do BOTH transitions in this single invocation
- *      (endAuction → wait for relayer → finalize).
+ *      Two pings per auction — one at endTime+30s (does endAuction) and one
+ *      at endTime+150s (does finalize). Each invocation processes a SINGLE
+ *      transition based on chain state, finishing in ~15-20s. Splitting like
+ *      this keeps every call well under Vercel Hobby's 60s function cap.
  *
  *   2. GitHub Actions safety-net cron every 30 min, no query param:
  *        GET /api/cron/finalize
@@ -80,17 +82,20 @@ type ActionResult = {
   error?: string
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
 /**
- * Process at most one auction's full transition chain.
+ * Process AT MOST ONE state transition for a single auction. The chain is
+ * the state machine — the route just dispatches the next step based on what
+ * it sees on chain. Splitting like this keeps every invocation well under
+ * Vercel Hobby's 60s function cap.
  *
- * `aggressive=true`: try BOTH endAuction and finalize in this one call. Used
- * for the cron-job.org one-shot path where we know we're firing right around
- * endTime and want to settle in a single invocation.
+ * Per call:
+ *   live (chainNow < endTime, !ended)             → skip
+ *   expired (chainNow >= endTime, !ended)         → call endAuction
+ *   ended && !finalized                           → publicDecrypt + finalize
+ *   finalized                                     → skip
  *
- * `aggressive=false`: do at most one transition. Used for the safety-net
- * path where the next tick will pick up whatever's left.
+ * cron-job.org schedules two one-shots per auction (endTime+30s and
+ * endTime+150s) so the two transitions happen in two separate invocations.
  */
 async function processAuction(
   id: bigint,
@@ -99,20 +104,16 @@ async function processAuction(
   account: PrivateKeyAccount,
   getZama: () => Promise<Awaited<ReturnType<typeof import("@zama-fhe/relayer-sdk/node").createInstance>>>,
   chainNow: bigint,
-  aggressive: boolean,
 ): Promise<ActionResult[]> {
   const out: ActionResult[] = []
 
-  // Re-read auction state (caller may have read it earlier; we re-read here
-  // so each transition operates on fresh state, which matters when we chain
-  // endAuction → finalize within one invocation).
   const tuple0 = await publicClient.readContract({
     address: AUCTION_ADDRESS,
     abi: AUCTION_ABI,
     functionName: "getAuction",
     args: [id],
   })
-  let a = parseAuctionTuple(tuple0, id)
+  const a = parseAuctionTuple(tuple0, id)
 
   if (a.finalized) {
     out.push({ auctionId: id.toString(), action: "skip-finalized" })
@@ -143,26 +144,8 @@ async function processAuction(
         action: "endAuction",
         error: (e as Error).message.slice(0, 240),
       })
-      return out
     }
-
-    if (!aggressive) return out
-
-    // Aggressive path: refresh state then continue into finalize. Give the
-    // Zama relayer a moment to observe the makePubliclyDecryptable call —
-    // typically 1-2 blocks (~24s) on Sepolia.
-    await sleep(30_000)
-    const tuple1 = await publicClient.readContract({
-      address: AUCTION_ADDRESS,
-      abi: AUCTION_ABI,
-      functionName: "getAuction",
-      args: [id],
-    })
-    a = parseAuctionTuple(tuple1, id)
-    if (a.finalized) {
-      out.push({ auctionId: id.toString(), action: "skip-finalized" })
-      return out
-    }
+    return out
   }
 
   // Transition 2: ended → finalized.
@@ -305,7 +288,6 @@ export async function GET(req: Request) {
       account,
       getZama,
       chainNow,
-      true,
     )
     return NextResponse.json({
       ok: true,
@@ -340,7 +322,6 @@ export async function GET(req: Request) {
       account,
       getZama,
       chainNow,
-      false,
     )
     allResults.push(...r)
     // First non-skip action returns — bound the budget so a slow relayer

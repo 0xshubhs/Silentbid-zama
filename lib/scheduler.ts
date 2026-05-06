@@ -67,9 +67,50 @@ function fireDateToSchedule(fire: Date): CronJobSchedule {
 }
 
 export type ScheduleResult = {
-  jobId: number
-  fireAt: string // ISO UTC string of intended fire moment
+  endJobId: number
+  finalizeJobId: number
+  endFireAt: string
+  finalizeFireAt: string
   url: string
+}
+
+async function createOneShot(opts: {
+  url: string
+  title: string
+  fireAt: Date
+  cronSecret: string
+  apiKey: string
+}): Promise<number> {
+  const payload = {
+    job: {
+      url: opts.url,
+      enabled: true,
+      saveResponses: true,
+      title: opts.title,
+      requestMethod: 0, // 0 = GET
+      schedule: fireDateToSchedule(opts.fireAt),
+      extendedData: {
+        headers: { Authorization: `Bearer ${opts.cronSecret}` },
+      },
+    },
+  }
+  const res = await fetch(`${CRONJOB_API_BASE}/jobs`, {
+    method: "PUT",
+    headers: {
+      "Authorization": `Bearer ${opts.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => "")
+    throw new Error(`cron-job.org PUT /jobs ${res.status}: ${body.slice(0, 240)}`)
+  }
+  const data = (await res.json()) as { jobId?: number }
+  if (typeof data.jobId !== "number") {
+    throw new Error("cron-job.org response missing jobId")
+  }
+  return data.jobId
 }
 
 export async function scheduleAuctionFinalize(opts: {
@@ -81,53 +122,43 @@ export async function scheduleAuctionFinalize(opts: {
 }): Promise<ScheduleResult> {
   const { auctionId, endTimeUnix, baseUrl, cronSecret, apiKey } = opts
 
-  // Fire 90s after endTime to give chain consensus + Zama relayer indexing a
-  // safety margin. The route itself re-checks `block.timestamp >= endTime`
-  // anyway, so being a few seconds late is harmless and being early is
-  // self-corrected. 90s is also long enough that a one-shot fire can do BOTH
-  // transitions (endAuction + finalize) in a single Vercel invocation,
-  // because by then the relayer will have indexed makePubliclyDecryptable.
-  const fireUnix = Number(endTimeUnix) + 90
-  const fireAt = new Date(fireUnix * 1000)
-  const url = `${baseUrl.replace(/\/$/, "")}/api/cron/finalize?auctionId=${auctionId}`
+  // Vercel Hobby caps function duration at 60s. Doing endAuction + 30s
+  // relayer wait + finalize in a single invocation runs ~57s — uncomfortably
+  // close to the cap. So we split into TWO one-shots and let the route's
+  // state machine run a single transition per call (~15-20s each):
+  //
+  //   endTime + 30s   → fires endAuction
+  //   endTime + 150s  → fires finalize (relayer has had 120s to index)
+  //
+  // The route is idempotent on chain state, so even if cron-job.org delivers
+  // both pings out of order or duplicates, nothing bad happens.
+  const baseClean = baseUrl.replace(/\/$/, "")
+  const url = `${baseClean}/api/cron/finalize?auctionId=${auctionId}`
 
-  // cron-job.org docs: PUT /jobs to create. Title is for the dashboard only.
-  const payload = {
-    job: {
-      url,
-      enabled: true,
-      saveResponses: true,
-      title: `silentbid-finalize-${auctionId}`,
-      requestMethod: 0, // 0 = GET
-      schedule: fireDateToSchedule(fireAt),
-      // cron-job.org sends arbitrary headers as an object on `extendedData`.
-      // The Bearer token gates /api/cron/finalize against arbitrary callers.
-      extendedData: {
-        headers: {
-          Authorization: `Bearer ${cronSecret}`,
-        },
-      },
-    },
-  }
+  const endFireAt = new Date((Number(endTimeUnix) + 30) * 1000)
+  const finalizeFireAt = new Date((Number(endTimeUnix) + 150) * 1000)
 
-  const res = await fetch(`${CRONJOB_API_BASE}/jobs`, {
-    method: "PUT",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  // Sequential, not parallel — cron-job.org's API rate-limits bursts.
+  const endJobId = await createOneShot({
+    url,
+    title: `silentbid-end-${auctionId}`,
+    fireAt: endFireAt,
+    cronSecret,
+    apiKey,
+  })
+  const finalizeJobId = await createOneShot({
+    url,
+    title: `silentbid-finalize-${auctionId}`,
+    fireAt: finalizeFireAt,
+    cronSecret,
+    apiKey,
   })
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "")
-    throw new Error(`cron-job.org PUT /jobs ${res.status}: ${body.slice(0, 240)}`)
+  return {
+    endJobId,
+    finalizeJobId,
+    endFireAt: endFireAt.toISOString(),
+    finalizeFireAt: finalizeFireAt.toISOString(),
+    url,
   }
-
-  const data = (await res.json()) as { jobId?: number }
-  if (typeof data.jobId !== "number") {
-    throw new Error("cron-job.org response missing jobId")
-  }
-
-  return { jobId: data.jobId, fireAt: fireAt.toISOString(), url }
 }

@@ -106,14 +106,16 @@ lib/scheduler.ts                   # cron-job.org REST wrapper
 vercel.json                         # function-level maxDuration only
 ```
 
-**Layer 1: cron-job.org one-shot (precise primary path).**
+**Layer 1: cron-job.org one-shots (precise primary path).**
 After `createAuction` is mined, the frontend POSTs `{auctionId}` to
 `/api/scheduler`. That route re-reads the auction from chain (the client
 never gets to set the timing — only the chain's own `endTime` matters),
-then registers a single fire at `endTime + 90s` against
-`/api/cron/finalize?auctionId=N`. When the one-shot fires, the keeper does
-**both** transitions in one invocation: `endAuction` → wait 30s for relayer
-indexing → `publicDecrypt` → `finalizeAuctionItem`.
+then registers **two** one-shots against `/api/cron/finalize?auctionId=N`:
+one at `endTime + 30s` (drives `endAuction`) and one at `endTime + 150s`
+(drives `publicDecrypt + finalizeAuctionItem`). Each invocation does at
+most one transition based on chain state, finishing in ~15-20s — well
+under Vercel Hobby's 60s function cap. The two one-shots share the same
+URL and the route's state machine handles whichever transition is next.
 
 **Layer 2: GitHub Actions sweep (fallback safety net).**
 `*/30 * * * *` pings `/api/cron/finalize` (no `auctionId`) which iterates
@@ -136,9 +138,10 @@ ended     (a.ended && !a.finalized)                → publicDecrypt + finalize
 finalized (a.finalized)                            → skip
 ```
 
-**Latency budget (happy path with cron-job.org):** ~90s after `endTime` → both
-txs land. Worst case (cron-job.org missed it, GH safety net catches up):
-~30 min. The frontend's manual finalize button still works either way.
+**Latency budget (happy path with cron-job.org):** `endAuction` lands ~30s
+after `endTime`, `finalize` lands ~150-160s after `endTime`. Worst case
+(both one-shots missed, GH safety net catches up): ~30 min per transition.
+The frontend's manual finalize button still works either way.
 
 **Env vars required on Vercel (Project → Settings → Environment Variables):**
 
@@ -185,8 +188,10 @@ curl -X POST -H "Content-Type: application/json" \
   — they don't match. Fix is in `_verifyTokenDecryption` at
   `contracts/src/SilentBidAuction.sol:530-546`. Until redeployed, TOKEN-mode
   auctions still need the manual finalize button.
-- cron-job.org free tier caps you at 50 active jobs. Auto-expiry (10 min
-  past fire time) keeps the slot pool fresh as auctions finalize.
+- cron-job.org free tier caps you at 50 active jobs. Each auction uses
+  TWO slots (endAuction + finalize one-shots), so the practical ceiling is
+  ~25 simultaneously-pending auctions. Auto-expiry (10 min past fire) keeps
+  the slot pool fresh as auctions finalize.
 
 ## How the FHE flow works
 
