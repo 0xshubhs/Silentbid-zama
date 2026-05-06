@@ -127,6 +127,27 @@ export function CreateAuctionForm() {
           d?.eventName === "AuctionCreatedItem" || d?.eventName === "AuctionCreatedToken",
         )
       const newId = (evt?.args as { auctionId?: bigint } | undefined)?.auctionId
+
+      // Best-effort: register a cron-job.org one-shot at endTime+90s so the
+      // keeper fires precisely when this auction expires. The endpoint
+      // re-reads the auction from chain, so a malicious or stale client
+      // can't influence what gets scheduled. On failure (network blip,
+      // cron-job.org down, env not configured) the GH Actions safety net
+      // still picks up the auction within 30 min — so we don't block the
+      // navigation on this call.
+      if (newId !== undefined) {
+        fetch("/api/scheduler", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ auctionId: newId.toString() }),
+        }).catch((err) => {
+          // Swallow — UX shouldn't see infra errors. GH safety net is the
+          // backup. Log to console for the developer.
+          // eslint-disable-next-line no-console
+          console.warn("auto-schedule failed (safety net will catch up):", err)
+        })
+      }
+
       router.push(newId !== undefined ? `/auctions/${newId.toString()}` : "/auctions")
     } catch (err) {
       setError(err instanceof Error ? err.message.slice(0, 200) : "Create failed")

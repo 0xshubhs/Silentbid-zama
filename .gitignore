@@ -10,6 +10,7 @@
 !.yarn/releases
 !.yarn/versions
 
+./scripts
 # testing
 /coverage
 
@@ -45,3 +46,8 @@ next-env.d.ts
 # Foundry dependencies (reinstall via forge install + forge soldeer install)
 contracts/lib/
 contracts/.git/
+
+
+# E2E test driver state (private keys for ephemeral bidder EOAs)
+scripts/.bidders.json
+

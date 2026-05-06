@@ -1,0 +1,56 @@
+name: auction-keeper
+
+# Pings /api/cron/finalize on a schedule so live auctions automatically
+# transition: live → ended → finalized. The route is stateless and idempotent
+# (chain is the source of truth) so missing a tick or running twice is safe.
+#
+# GitHub's cron floor is 5 min on all plans. Worst-case latency from `endTime`
+# to settled is therefore ~15 min: 1 tick to call endAuction, ~1 tick of
+# Zama relayer indexing lag, 1 tick to call finalizeAuctionItem.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   KEEPER_URL    e.g. https://silentbid-zama.vercel.app
+#   CRON_SECRET   same string set as CRON_SECRET in Vercel env vars
+
+on:
+  # Safety-net path. Primary scheduling is done per-auction via cron-job.org
+  # one-shots (registered by /api/scheduler at create time). This sweep at
+  # 30-min granularity catches any auction whose one-shot was missed —
+  # cron-job.org outage, scheduling-API call failed, browser closed before
+  # the POST landed, etc. 30 min + GH cron jitter = ~35 min worst-case
+  # latency on the fallback path.
+  schedule:
+    - cron: "*/30 * * * *"
+  # manual trigger from the Actions tab — useful for forcing a tick
+  # immediately after deploying or expiring an auction.
+  workflow_dispatch:
+
+# Don't pile up runs if a previous tick is still going. The handler is
+# bounded at 60s by Vercel anyway, so this just keeps the queue tidy.
+concurrency:
+  group: auction-keeper
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: hit /api/cron/finalize
+        env:
+          KEEPER_URL: ${{ secrets.KEEPER_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEEPER_URL:-}" ] || [ -z "${CRON_SECRET:-}" ]; then
+            echo "::error::Missing KEEPER_URL or CRON_SECRET repo secret"
+            exit 1
+          fi
+          # --fail-with-body so we still see the JSON error if the route 4xx/5xxs.
+          # -m 90 gives the route's 60s maxDuration room plus TLS + handshake.
+          curl --fail-with-body -sS -m 90 \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            "${KEEPER_URL%/}/api/cron/finalize" \
+            | tee response.json
+          echo
+          echo "::notice::keeper tick OK at $(date -u +%FT%TZ)"

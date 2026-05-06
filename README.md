@@ -92,43 +92,90 @@ npm run dev
 # → http://localhost:3000
 ```
 
-### 4. Auto-finalize keeper (Vercel cron)
+### 4. Auto-finalize keeper (cron-job.org one-shots + GH Actions safety net)
 
 Zama FHEVM v0.11 has no on-chain decryption callback — somebody has to fetch
 plaintext + KMS signatures from the relayer and submit them to
-`finalizeAuction*`. We do that automatically with a Vercel cron job:
+`finalizeAuction*`. We do that automatically with a two-layer scheduler:
 
 ```
-app/api/cron/finalize/route.ts   # stateless keeper handler
-vercel.json                       # crons: */2 * * * * → /api/cron/finalize
+app/api/cron/finalize/route.ts    # stateless keeper handler (the executor)
+app/api/scheduler/route.ts         # POST endpoint that registers one-shots
+lib/scheduler.ts                   # cron-job.org REST wrapper
+.github/workflows/keeper.yml        # GH Actions safety-net sweep every 30 min
+vercel.json                         # function-level maxDuration only
 ```
 
-State machine per tick (chain is the source of truth — no DB):
+**Layer 1: cron-job.org one-shot (precise primary path).**
+After `createAuction` is mined, the frontend POSTs `{auctionId}` to
+`/api/scheduler`. That route re-reads the auction from chain (the client
+never gets to set the timing — only the chain's own `endTime` matters),
+then registers a single fire at `endTime + 90s` against
+`/api/cron/finalize?auctionId=N`. When the one-shot fires, the keeper does
+**both** transitions in one invocation: `endAuction` → wait 30s for relayer
+indexing → `publicDecrypt` → `finalizeAuctionItem`.
+
+**Layer 2: GitHub Actions sweep (fallback safety net).**
+`*/30 * * * *` pings `/api/cron/finalize` (no `auctionId`) which iterates
+every auction and processes one transition per call. Catches any auction
+whose one-shot was missed — cron-job.org outage, scheduling-API call failed,
+browser closed before the scheduler POST landed, etc.
+
+**Time check is anchored to chain `block.timestamp`, not server clock.**
+Validators publish blocks with timestamps that drift up to a few seconds
+from wall-clock; cron-job.org has its own clock. We always read the latest
+block's timestamp and compare against `auction.endTime`, which is the same
+clock the contract uses to gate `endAuction`. This makes the system immune
+to scheduler clock skew — if cron-job.org fires a few seconds early the
+keeper sees `chainNow < endTime` and skips gracefully.
 
 ```
-live (now < endTime, !ended)         → skip
-expired (now >= endTime, !ended)     → call endAuction
-ended && !finalized                  → publicDecrypt + finalizeAuctionItem
-finalized                            → skip
+live      (chainNow < endTime, !ended)             → skip
+expired   (chainNow >= endTime, !ended)            → call endAuction
+ended     (a.ended && !a.finalized)                → publicDecrypt + finalize
+finalized (a.finalized)                            → skip
 ```
 
-Each tick processes one transition; cron at `*/2 * * * *` means worst-case
-latency from `endTime` → settlement is ~6 minutes. The frontend's manual
-finalize button stays as a fallback if the keeper is offline.
+**Latency budget (happy path with cron-job.org):** ~90s after `endTime` → both
+txs land. Worst case (cron-job.org missed it, GH safety net catches up):
+~30 min. The frontend's manual finalize button still works either way.
 
-**Env vars required (Vercel project → Settings → Environment Variables):**
+**Env vars required on Vercel (Project → Settings → Environment Variables):**
 
 ```bash
 KEEPER_PRIVATE_KEY=0x...    # any funded EOA on Sepolia (~0.05 ETH for headroom)
 CRON_SECRET=<random-string> # protects /api/cron/finalize from arbitrary callers
+CRONJOBORGAPIKEY=<api-key>  # cron-job.org account API key (Settings → API)
+KEEPER_URL=https://<project>.vercel.app   # explicit base URL (optional —
+                                          # auto-resolved from request host
+                                          # otherwise)
 NEXT_PUBLIC_AUCTION_ADDRESS=0xa10314...
 NEXT_PUBLIC_SEPOLIA_RPC_URL=https://sepolia.gateway.tenderly.co
+```
+
+**Repo secrets for the GH Actions safety-net cron** (Settings → Secrets and
+variables → Actions):
+
+```
+KEEPER_URL    https://<your-project>.vercel.app
+CRON_SECRET   same value as the Vercel env var above
 ```
 
 For local testing:
 
 ```bash
-curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/finalize
+# Trigger a one-shot for a specific auction
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  "http://localhost:3000/api/cron/finalize?auctionId=0"
+
+# Trigger the safety-net sweep
+curl -H "Authorization: Bearer $CRON_SECRET" \
+  "http://localhost:3000/api/cron/finalize"
+
+# Schedule a one-shot via the scheduler endpoint
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"auctionId":"0"}' \
+  http://localhost:3000/api/scheduler
 ```
 
 **Limitations:**
@@ -138,9 +185,8 @@ curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/fina
   — they don't match. Fix is in `_verifyTokenDecryption` at
   `contracts/src/SilentBidAuction.sol:530-546`. Until redeployed, TOKEN-mode
   auctions still need the manual finalize button.
-- Vercel Hobby plan caps cron frequency to once/day per job — use Pro for
-  per-minute. Local dev or any always-on Node host (Railway, Fly, your laptop)
-  works just as well.
+- cron-job.org free tier caps you at 50 active jobs. Auto-expiry (10 min
+  past fire time) keeps the slot pool fresh as auctions finalize.
 
 ## How the FHE flow works
 

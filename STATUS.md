@@ -23,22 +23,45 @@ Last updated: 2026-05-06
 - Explicit `gas:` caps on every `writeContract` to skip RPC `eth_estimateGas`
 
 ### Auto-finalize keeper (the new bit)
-- `app/api/cron/finalize/route.ts` — stateless Next.js cron handler
-- `vercel.json` — `*/2 * * * *` schedule
+
+Two-layer scheduler: precise per-auction one-shots primary, periodic sweep secondary.
+
+- `app/api/cron/finalize/route.ts` — keeper executor (Vercel function)
+  - `?auctionId=N` mode: aggressively run BOTH transitions in one call (endAuction → 30s wait → publicDecrypt → finalize)
+  - no-param mode: sweep all auctions, one transition per call (safety-net path)
+  - Time check uses on-chain `block.timestamp`, never `Date.now()` — immune to scheduler clock skew
+- `app/api/scheduler/route.ts` — POST {auctionId}; re-reads auction from chain, validates state, registers a cron-job.org one-shot at `endTime + 90s`
+- `lib/scheduler.ts` — cron-job.org REST wrapper (one PUT to `/jobs`, schedules a one-shot fire with auto-expiry 10 min after fire window)
+- `.github/workflows/keeper.yml` — GitHub Actions sweep `*/30 * * * *` (safety net only)
+- `vercel.json` — function-level `maxDuration: 60` only (Hobby cron is useless: 1/day cap)
 - `next.config.ts` — `serverExternalPackages: [node-tfhe, node-tkms, @zama-fhe/relayer-sdk]` so the WASM blobs aren't broken by webpack
-- State machine (chain is the source of truth, no DB):
-  - `live` → skip
+- `app/auctions/new/create-auction-form.tsx` — fires a non-blocking POST to `/api/scheduler` after createAuction is mined
+
+State machine per auction (chain is the source of truth, no DB):
+  - `live` (chainNow < endTime) → skip
   - `endTime` reached, `!ended` → call `endAuction`
   - `ended && !finalized` → `relayer.publicDecrypt(handles)` → `finalizeAuctionItem(id, winner, amount, proof)`
   - `finalized` → skip
-- Verified live: 3 keeper invocations finalized auctions #0 and #1 with no manual intervention
+
+Verified live (sweep mode, the original implementation): 3 keeper invocations finalized auctions #0 and #1 with no manual intervention
   - `0xaa7a3a7be21e65872258456ed1cd3b13532a79f14569fe841d96f26388dc71ed` (finalize #0)
   - `0x9f61a65d67342984dd33dcc7f6b9e811a8e6e7792df5595baf7a311dbe98d161` (finalize #1)
+
+**One-shot path verified live (2026-05-06)** — local E2E run via cloudflared tunnel + dev server, two zero-bid auctions:
+
+| Auction | Duration | endTime → ENDED | endTime → FINALIZED | Finalize tx |
+|---|---|---|---|---|
+| #3 | 3-min | +87s | +149s | `0x13e05adb832eb6aa46e43aa22330ef36c96b4f4bc3a7b8c83e2e66c68f4f9a91` |
+| #4 | 15-min | +102s | +180s | `0x6ee737527e310f6e2e0544903e23522cdacbb3b2029e19d6d0c75d0ebdac7c6b` |
+
+Settlement landed in **~2.5–3 min after endTime** for both, all driven by a single cron-job.org one-shot per auction with no human in the loop. The /api/cron/finalize?auctionId=N route ran for 71s (auction #3) / 103s (auction #4) and chained both transitions in one invocation.
 
 ## 🟡 Partial / Caveats
 
 - **Keeper supports ITEM mode only.** TOKEN mode is gated behind a contract bug — see Remaining.
-- **Vercel Hobby cron caps at 1/day per job.** Per-minute requires Pro, or run the keeper on any always-on Node host (Railway / Fly / VPS / laptop).
+- **One-shot precision** measured live: endTime → ENDED is +87s/+102s, endTime → FINALIZED is +149s/+180s (both auctions on 2026-05-06).
+- **Safety-net latency = ~30 min worst case** (GH Actions cron `*/30` + small jitter). This is the fallback when cron-job.org missed the auction.
+- **Total cron-job.org slot usage = 1 active job per pending auction.** Free-tier cap is 50, so up to 50 simultaneously-pending auctions before the limit bites. Auto-expiry keeps the pool fresh as auctions finalize.
 - **Privacy of TOKEN-mode losers.** `endAuction` makes every bid's `(encPrice, encQty)` publicly decryptable — every loser's bid leaks at settlement. ITEM mode losers stay private.
 - **Bid count, bidder address, and participation flag** are plaintext on-chain (event topics + `hasBid` mapping). This is unchanged from the original architecture.
 
@@ -82,12 +105,16 @@ For now, pitch as: *"Sealed-bid auction with Zama FHE, inspired by CCA's clearin
 
 ```
 contracts/src/SilentBidAuction.sol     — ITEM + TOKEN modes; check :530–546 for the encoding bug
-app/api/cron/finalize/route.ts          — auto-finalize keeper (Vercel cron handler)
-vercel.json                              — cron schedule + maxDuration
+app/api/cron/finalize/route.ts          — keeper executor (?auctionId=N or sweep)
+app/api/scheduler/route.ts              — POST endpoint that registers cron-job.org one-shots
+lib/scheduler.ts                        — cron-job.org REST wrapper
+app/auctions/new/create-auction-form.tsx — POSTs to /api/scheduler after createAuction
+.github/workflows/keeper.yml             — GH Actions safety-net sweep every 30 min
+vercel.json                              — maxDuration only (Hobby cron is unusable)
 next.config.ts                           — serverExternalPackages for the SDK WASM
 lib/zama.ts                              — relayer-sdk wrapper (client-side encryption + decryption)
 lib/zama-contracts.ts                    — ABIs + addresses + AuctionData type + parseAuctionTuple
 lib/chain-config.ts                      — sepolia chain export
 app/auctions/[id]/reveal-panel.tsx       — manual finalize fallback (still works alongside the keeper)
-.env.local                               — addresses + KEEPER_PRIVATE_KEY + CRON_SECRET (gitignored)
+.env.local                               — addresses + KEEPER_PRIVATE_KEY + CRON_SECRET + CRONJOBORGAPIKEY (gitignored)
 ```
